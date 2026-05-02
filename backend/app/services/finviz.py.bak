@@ -1,0 +1,257 @@
+"""
+Finviz client for insider trading and analyst ratings.
+Uses Playwright headless browser to bypass Cloudflare protection.
+No API key required.
+"""
+from bs4 import BeautifulSoup
+from typing import List, Dict, Optional
+from datetime import datetime
+import time
+import asyncio
+from playwright.async_api import async_playwright
+
+
+class FinvizClient:
+    """Finviz client using Playwright headless browser."""
+    
+    BASE_URL = "https://finviz.com"
+    
+    def __init__(self):
+        self.last_request_time = 0
+        self.min_delay = 2.0  # 2 seconds between requests
+        self.playwright = None
+        self.browser = None
+    
+    async def _init_browser(self):
+        """Initialize Playwright browser if not already done."""
+        if not self.playwright:
+            self.playwright = await async_playwright().start()
+            self.browser = await self.playwright.chromium.launch(
+                headless=True,
+                args=['--no-sandbox', '--disable-dev-shm-usage']
+            )
+    
+    async def _close_browser(self):
+        """Close browser resources."""
+        if self.browser:
+            await self.browser.close()
+        if self.playwright:
+            await self.playwright.stop()
+    
+    def _rate_limit(self):
+        """Enforce rate limiting."""
+        elapsed = time.time() - self.last_request_time
+        if elapsed < self.min_delay:
+            time.sleep(self.min_delay - elapsed)
+        self.last_request_time = time.time()
+    
+    async def _fetch_page(self, url: str, params: dict = None) -> str:
+        """Fetch page using Playwright browser."""
+        await self._init_browser()
+        
+        context = await self.browser.new_context(
+            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            viewport={'width': 1920, 'height': 1080}
+        )
+        
+        page = await context.new_page()
+        
+        try:
+            # Build URL with params
+            full_url = url
+            if params:
+                query = '&'.join([f"{k}={v}" for k, v in params.items()])
+                full_url = f"{url}?{query}"
+            
+            # Navigate and wait for content
+            await page.goto(full_url, wait_until='networkidle', timeout=30000)
+            
+            # Wait for Cloudflare challenge to complete
+            await asyncio.sleep(3)
+            
+            # Get page content
+            content = await page.content()
+            
+            await context.close()
+            return content
+            
+        except Exception as e:
+            await context.close()
+            raise e
+    
+    def _rate_limit(self):
+        """Enforce rate limiting."""
+        elapsed = time.time() - self.last_request_time
+        if elapsed < self.min_delay:
+            time.sleep(self.min_delay - elapsed)
+        self.last_request_time = time.time()
+    
+    async def _get_insider_trading_async(self, ticker: str) -> List[Dict]:
+        """Async version using Playwright."""
+        try:
+            self._rate_limit()
+            
+            url = f"{self.BASE_URL}/insidertrading.ashx"
+            params = {"ticker": ticker}
+            
+            content = await self._fetch_page(url, params)
+            soup = BeautifulSoup(content, "html.parser")
+            
+            # Find the insider trading table
+            table = soup.find("table", {"class": "body-table"})
+            if not table:
+                return []
+            
+            transactions = []
+            rows = table.find_all("tr")[1:]  # Skip header
+            
+            for row in rows[:10]:  # Get top 10 transactions
+                cols = row.find_all("td")
+                if len(cols) >= 8:
+                    transactions.append({
+                        "insider_name": cols[0].text.strip(),
+                        "title": cols[1].text.strip(),
+                        "date": cols[2].text.strip(),
+                        "transaction_type": cols[3].text.strip(),
+                        "price": cols[4].text.strip(),
+                        "shares": cols[5].text.strip(),
+                        "value": cols[6].text.strip(),
+                        "shares_owned": cols[7].text.strip()
+                    })
+            
+            return transactions
+            
+        except Exception as e:
+            print(f"Error fetching Finviz insider data: {e}")
+            return []
+    
+    def get_insider_trading(self, ticker: str) -> List[Dict]:
+        """Sync wrapper for async method."""
+        try:
+            return asyncio.run(self._get_insider_trading_async(ticker))
+        except Exception as e:
+            print(f"Error in get_insider_trading: {e}")
+            return []
+    
+    async def _get_news_async(self, ticker: str) -> List[Dict]:
+        """Async version using Playwright."""
+        try:
+            self._rate_limit()
+            
+            url = f"{self.BASE_URL}/news.ashx"
+            params = {"ticker": ticker}
+            
+            content = await self._fetch_page(url, params)
+            soup = BeautifulSoup(content, "html.parser")
+            
+            # Find news table
+            news_table = soup.find("table", {"class": "fullview-news-outer"})
+            if not news_table:
+                return []
+            
+            articles = []
+            rows = news_table.find_all("tr")
+            
+            for row in rows[:20]:  # Get top 20 news items
+                cols = row.find_all("td")
+                if len(cols) >= 2:
+                    date_text = cols[0].text.strip()
+                    link_elem = cols[1].find("a")
+                    if link_elem:
+                        title = link_elem.text.strip()
+                        link = link_elem.get("href", "")
+                        source_elem = cols[1].find("span")
+                        source = source_elem.text.strip() if source_elem else "Finviz"
+                        
+                        pub_date = ""
+                        try:
+                            if date_text:
+                                for fmt in ["%b-%d-%y %I:%M%p", "%Y-%m-%d %H:%M:%S"]:
+                                    try:
+                                        dt = datetime.strptime(date_text, fmt)
+                                        pub_date = dt.isoformat() + "Z"
+                                        break
+                                    except:
+                                        continue
+                        except:
+                            pub_date = date_text
+                        
+                        articles.append({
+                            "title": title,
+                            "description": title,
+                            "content": title,
+                            "url": link,
+                            "source": source,
+                            "published_at": pub_date,
+                            "author": "",
+                            "_source": "finviz"
+                        })
+            
+            return articles
+            
+        except Exception as e:
+            print(f"Error fetching Finviz news: {e}")
+            return []
+    
+    def get_news(self, ticker: str) -> List[Dict]:
+        """Sync wrapper for async method."""
+        try:
+            return asyncio.run(self._get_news_async(ticker))
+        except Exception as e:
+            print(f"Error in get_news: {e}")
+            return []
+    
+    async def _get_stock_screen_data_async(self, ticker: str) -> Optional[Dict]:
+        """Async version using Playwright."""
+        try:
+            self._rate_limit()
+            
+            url = f"{self.BASE_URL}/quote.ashx"
+            params = {"t": ticker}
+            
+            content = await self._fetch_page(url, params)
+            soup = BeautifulSoup(content, "html.parser")
+            
+            data = {}
+            table = soup.find("table", {"class": "snapshot-table2"})
+            if table:
+                rows = table.find_all("tr")
+                for row in rows:
+                    cols = row.find_all("td")
+                    for i in range(0, len(cols) - 1, 2):
+                        if i + 1 < len(cols):
+                            key = cols[i].text.strip()
+                            value = cols[i + 1].text.strip()
+                            data[key] = value
+            
+            return data
+            
+        except Exception as e:
+            print(f"Error fetching Finviz stock data: {e}")
+            return None
+    
+    def get_stock_screen_data(self, ticker: str) -> Optional[Dict]:
+        """Sync wrapper for async method."""
+        try:
+            return asyncio.run(self._get_stock_screen_data_async(ticker))
+        except Exception as e:
+            print(f"Error in get_stock_screen_data: {e}")
+            return None
+    
+    async def _check_health_async(self) -> str:
+        """Async health check."""
+        try:
+            content = await self._fetch_page(self.BASE_URL)
+            if content and "finviz" in content.lower():
+                return "healthy"
+            return "degraded"
+        except Exception as e:
+            print(f"Finviz health check failed: {e}")
+            return "unreachable"
+    
+    def check_health(self) -> str:
+        """Sync wrapper for health check."""
+        try:
+            return asyncio.run(self._check_health_async())
+        except Exception:
+            return "unreachable"
