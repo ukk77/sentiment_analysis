@@ -210,7 +210,7 @@ class FinvizClient:
                                     pub_date = f"{today} {time_text}"
                                 else:
                                     pub_date = today
-                            except:
+                            except Exception:
                                 pub_date = time_text
                             
                             if title:  # Add if we have title

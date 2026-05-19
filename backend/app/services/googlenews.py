@@ -86,7 +86,7 @@ class GoogleNewsClient:
                         # Parse RFC 2822 format
                         dt = datetime.strptime(pub_date, "%a, %d %b %Y %H:%M:%S %Z")
                         pub_date = dt.isoformat() + "Z"
-                    except:
+                    except Exception:
                         pass
                 
                 normalized.append({
@@ -163,7 +163,7 @@ class GoogleNewsClient:
                     try:
                         dt = datetime.strptime(pub_date, "%a, %d %b %Y %H:%M:%S %Z")
                         pub_date = dt.isoformat() + "Z"
-                    except:
+                    except Exception:
                         pass
                 
                 normalized.append({
