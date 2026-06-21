@@ -4,6 +4,9 @@ from typing import List, Dict, Optional
 from app.config import get_settings
 
 
+_rate_limited = False  # module-level flag: set True on first 429, skips rest of batch
+
+
 class NewsAPIClient:
     BASE_URL = "https://newsapi.org/v2/everything"
     
@@ -48,8 +51,16 @@ class NewsAPIClient:
             "apiKey": self.api_key
         }
         
+        global _rate_limited
+        if _rate_limited:
+            return []
+
         try:
             response = requests.get(self.BASE_URL, params=params, timeout=30)
+            if response.status_code == 429:
+                _rate_limited = True
+                print("Error fetching NewsAPI data: 429 Too Many Requests — quota exhausted, skipping NewsAPI for remainder of batch")
+                return []
             response.raise_for_status()
             
             data = response.json()

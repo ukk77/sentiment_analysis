@@ -5,6 +5,7 @@ Pipeline applied in order:
   1. Cross-source deduplication (by normalized title + URL)
   2. Trusted financial domain whitelist (keyword-sourced articles only)
   3. Title relevance: ticker context regex + company alias map
+  4. NER validation: verify article is actually about the target company
 
 FinBERT confidence-based relevance filtering happens in the analyzer
 (dropped after sentiment scoring when max_prob < threshold).
@@ -12,6 +13,7 @@ FinBERT confidence-based relevance filtering happens in the analyzer
 import re
 from typing import List, Dict, Set, Tuple
 from urllib.parse import urlparse
+from .ner_validator import get_validator
 
 
 # ---------------------------------------------------------------------------
@@ -352,18 +354,21 @@ def filter_articles(
     ticker: str,
     company_name: str,
     verbose: bool = True,
+    enable_ner_validation: bool = True,
+    ner_min_confidence: float = 0.6,
 ) -> Tuple[List[Dict], Dict[str, int]]:
     """
-    Run full filter pipeline: dedup → domain whitelist → title relevance.
+    Run full filter pipeline: dedup → domain whitelist → title relevance → NER validation.
 
     Returns (filtered_articles, stats_dict).
-    Stats keys: input, dedup_dropped, domain_dropped, title_dropped, output
+    Stats keys: input, dedup_dropped, domain_dropped, title_dropped, ner_validation_dropped, output
     """
     stats = {
         "input": len(articles),
         "dedup_dropped": 0,
         "domain_dropped": 0,
         "title_dropped": 0,
+        "ner_validation_dropped": 0,
         "output": 0,
     }
 
@@ -380,6 +385,16 @@ def filter_articles(
     stats["title_dropped"] = len(articles) - len(kept_title)
     articles = kept_title
 
+    # 4. NER validation (verify articles are actually about the company)
+    if enable_ner_validation and articles:
+        validator = get_validator()
+        articles, ner_invalid, ner_stats = validator.validate_articles(
+            articles, ticker, company_name, min_confidence=ner_min_confidence
+        )
+        stats["ner_validation_dropped"] = ner_stats["invalid"]
+        if verbose and ner_stats["invalid"] > 0:
+            print(f"[article_filter] NER validation dropped {ner_stats['invalid']} articles")
+
     stats["output"] = len(articles)
     if verbose:
         print(
@@ -387,6 +402,7 @@ def filter_articles(
             f"dedup -{stats['dedup_dropped']}  -> "
             f"domain -{stats['domain_dropped']}  -> "
             f"title -{stats['title_dropped']}  -> "
+            f"ner -{stats['ner_validation_dropped']}  -> "
             f"{stats['output']} out"
         )
     return articles, stats

@@ -23,14 +23,23 @@ from app.services.newsapi import NewsAPIClient
 from app.services.finnhub import FinnhubClient
 from app.services.twitter import TwitterClient
 from app.services.googlenews import GoogleNewsClient
+from app.services.bingnews import BingNewsClient
 from app.services.secedgar import SECEDGARClient
 from app.services.yahoofinance import YahooFinanceClient
 from app.services.finviz import FinvizClient
+from app.services.financialjuice import FinancialJuiceClient
 from app.services.analyzer import FinBERTAnalyzer
 from app.services.article_filter import filter_articles
 from app.services import db as history_db
 from app.services.keywords import extract_keywords
 from app.services.correlation import compute_correlation
+from app.services.enhanced_metrics import (
+    compute_contrarian_signal,
+    compute_sector_relative_sentiment,
+    create_contrarian_metrics,
+    create_sector_relative_metrics,
+)
+from app.services.sector_mapping import get_sector_etf
 
 # Global instances
 analyzer = None
@@ -38,15 +47,17 @@ news_client = None
 finnhub_client = None
 twitter_client = None
 googlenews_client = None
+bingnews_client = None
 secedgar_client = None
 yahoofinance_client = None
 finviz_client = None
+financial_juice_client = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage application lifespan - load/unload model."""
-    global analyzer, news_client, finnhub_client, twitter_client, googlenews_client, secedgar_client, yahoofinance_client, finviz_client
+    global analyzer, news_client, finnhub_client, twitter_client, googlenews_client, bingnews_client, secedgar_client, yahoofinance_client, finviz_client, financial_juice_client
     
     # Startup
     print("Starting up... Loading model and clients")
@@ -57,9 +68,11 @@ async def lifespan(app: FastAPI):
         finnhub_client = FinnhubClient()
         twitter_client = TwitterClient()
         googlenews_client = GoogleNewsClient()
+        bingnews_client = BingNewsClient()
         secedgar_client = SECEDGARClient()
         yahoofinance_client = YahooFinanceClient()
         finviz_client = FinvizClient()
+        financial_juice_client = FinancialJuiceClient()
         print("Startup complete - all services loaded")
     except Exception as e:
         print(f"Error during startup: {e}")
@@ -69,9 +82,11 @@ async def lifespan(app: FastAPI):
         finnhub_client = FinnhubClient()
         twitter_client = TwitterClient()
         googlenews_client = GoogleNewsClient()
+        bingnews_client = BingNewsClient()
         secedgar_client = SECEDGARClient()
         yahoofinance_client = YahooFinanceClient()
         finviz_client = FinvizClient()
+        financial_juice_client = FinancialJuiceClient()
     
     yield
     
@@ -114,9 +129,11 @@ async def health_check():
     finnhub_status = finnhub_client.check_health() if finnhub_client else "not_loaded"
     twitter_status = twitter_client.check_health() if twitter_client else "not_loaded"
     googlenews_status = googlenews_client.check_health() if googlenews_client else "not_loaded"
+    bingnews_status = bingnews_client.check_health() if bingnews_client else "not_loaded"
     secedgar_status = secedgar_client.check_health() if secedgar_client else "not_loaded"
     yahoofinance_status = yahoofinance_client.check_health() if yahoofinance_client else "not_loaded"
     finviz_status = finviz_client.check_health() if finviz_client else "not_loaded"
+    financialjuice_status = financial_juice_client.check_health() if financial_juice_client else "not_loaded"
     model_loaded = analyzer.is_loaded if analyzer else False
     
     # Determine overall status
@@ -134,9 +151,11 @@ async def health_check():
         "finnhub": finnhub_status,
         "twitter": twitter_status,
         "googlenews": googlenews_status,
+        "bingnews": bingnews_status,
         "secedgar": secedgar_status,
         "yahoofinance": yahoofinance_status,
         "finviz": finviz_status,
+        "financialjuice": financialjuice_status,
         "model_loaded": model_loaded
     }
 
@@ -177,6 +196,12 @@ async def analyze_stock(request: AnalyzeRequest):
             max_articles=20
         )
         
+        bingnews_articles = bingnews_client.search_news(
+            ticker=request.ticker,
+            company_name=request.company_name,
+            max_articles=20
+        )
+        
         yahoofinance_articles = yahoofinance_client.get_news(
             ticker=request.ticker,
             max_articles=20
@@ -188,6 +213,12 @@ async def analyze_stock(request: AnalyzeRequest):
         
         secedgar_articles = secedgar_client.get_deep_dive_filings(
             ticker=request.ticker
+        )
+        
+        financialjuice_articles = financial_juice_client.get_company_news(
+            ticker=request.ticker,
+            company_name=request.company_name,
+            max_articles=20
         )
         
         # Get Twitter data if configured
@@ -209,6 +240,9 @@ async def analyze_stock(request: AnalyzeRequest):
         for article in googlenews_articles:
             article["_source"] = "googlenews"
         
+        for article in bingnews_articles:
+            article["_source"] = "bingnews"
+        
         for article in yahoofinance_articles:
             article["_source"] = "yahoofinance"
         
@@ -218,6 +252,9 @@ async def analyze_stock(request: AnalyzeRequest):
         for article in secedgar_articles:
             article["_source"] = "secedgar"
         
+        for article in financialjuice_articles:
+            article["_source"] = "financialjuice"
+        
         for article in twitter_articles:
             article["_source"] = "twitter"
         
@@ -226,9 +263,11 @@ async def analyze_stock(request: AnalyzeRequest):
             newsapi_articles + 
             finnhub_articles + 
             googlenews_articles + 
+            bingnews_articles +
             yahoofinance_articles + 
             finviz_articles + 
             secedgar_articles + 
+            financialjuice_articles +
             twitter_articles
         )
         
@@ -292,14 +331,37 @@ async def analyze_stock(request: AnalyzeRequest):
             "newsapi": sum(1 for a in analyzed_articles if a.get("_source") == "newsapi"),
             "finnhub": sum(1 for a in analyzed_articles if a.get("_source") == "finnhub"),
             "googlenews": sum(1 for a in analyzed_articles if a.get("_source") == "googlenews"),
+            "bingnews": sum(1 for a in analyzed_articles if a.get("_source") == "bingnews"),
             "yahoofinance": sum(1 for a in analyzed_articles if a.get("_source") == "yahoofinance"),
             "finviz": sum(1 for a in analyzed_articles if a.get("_source") == "finviz"),
             "secedgar": sum(1 for a in analyzed_articles if a.get("_source") == "secedgar"),
+            "financialjuice": sum(1 for a in analyzed_articles if a.get("_source") == "financialjuice"),
             "twitter": sum(1 for a in analyzed_articles if a.get("_source") == "twitter")
         }
         
         # Build metrics (include filter pipeline stats for transparency)
         fs = metrics.get("filter_stats") or {}
+        
+        # Compute enhanced metrics
+        contrarian_result = compute_contrarian_signal(
+            avg_sentiment=metrics["average_score"],
+            confidence=metrics["confidence"],
+            total_articles=metrics["total"],
+        )
+        contrarian_metrics = create_contrarian_metrics(contrarian_result)
+        
+        # Sector-relative metrics (requires sector sentiment data - simplified for single ticker)
+        # For a single ticker request, we compute what we can without fetching sector ETFs
+        sector_etf = get_sector_etf(request.ticker)
+        sector_relative_metrics = None
+        if sector_etf:
+            sector_relative_result = compute_sector_relative_sentiment(
+                ticker=request.ticker,
+                ticker_sentiment=metrics["average_score"],
+                sector_sentiments={},  # Would be populated with pre-fetched sector data
+            )
+            sector_relative_metrics = create_sector_relative_metrics(sector_relative_result)
+        
         sentiment_metrics = SentimentMetrics(
             total_articles=metrics["total"],
             positive_count=metrics["positive"],
@@ -312,9 +374,12 @@ async def analyze_stock(request: AnalyzeRequest):
                 dedup_dropped=fs.get("dedup_dropped", 0),
                 domain_dropped=fs.get("domain_dropped", 0),
                 title_dropped=fs.get("title_dropped", 0),
+                ner_validation_dropped=fs.get("ner_validation_dropped", 0),
                 finbert_relevance_dropped=metrics.get("relevance_dropped", 0),
                 output=metrics["total"],
             ),
+            contrarian=contrarian_metrics,
+            sector_relative=sector_relative_metrics,
         )
         
         # Determine overall sentiment
@@ -394,6 +459,10 @@ async def analyze_stock(request: AnalyzeRequest):
 
         # --- Historical Tracking (SQLite, zero-config) ---
         try:
+            # Extract contrarian and sector fields from metrics
+            contrarian = sentiment_metrics.contrarian
+            sector_rel = sentiment_metrics.sector_relative
+            
             history_db.save_snapshot(
                 ticker=request.ticker,
                 avg_sentiment=metrics["average_score"],
@@ -403,6 +472,12 @@ async def analyze_stock(request: AnalyzeRequest):
                 positive_count=metrics["positive"],
                 negative_count=metrics["negative"],
                 neutral_count=metrics["neutral"],
+                contrarian_signal=contrarian.signal.value if contrarian else None,
+                sentiment_percentile=contrarian.sentiment_percentile if contrarian else None,
+                sector_etf=sector_rel.sector_etf if sector_rel else None,
+                sector_sentiment=sector_rel.sector_sentiment if sector_rel else None,
+                relative_sentiment=sector_rel.relative_sentiment if sector_rel else None,
+                percentile_vs_sector=sector_rel.percentile_vs_sector if sector_rel else None,
             )
         except Exception as e:
             print(f"Error saving history snapshot: {e}")

@@ -10,6 +10,12 @@ class SentimentLabel(str, Enum):
     NEUTRAL = "neutral"
 
 
+class ContrarianSignal(str, Enum):
+    NONE = "none"
+    EXTREME_BULLISH_CAUTION = "extreme_bullish_caution"
+    EXTREME_BEARISH_OPPORTUNITY = "extreme_bearish_opportunity"
+
+
 class PriceDataPoint(BaseModel):
     date: str
     open: float
@@ -44,7 +50,21 @@ class FilterStats(BaseModel):
     domain_dropped: int = 0
     title_dropped: int = 0
     finbert_relevance_dropped: int = 0
+    ner_validation_dropped: int = 0  # Articles dropped due to NER entity mismatch
     output: int = 0
+
+
+class ContrarianMetrics(BaseModel):
+    signal: ContrarianSignal = ContrarianSignal.NONE
+    sentiment_percentile: Optional[float] = None  # 0-1 scale, where 1 = extreme bullish
+    confidence_threshold_met: bool = False
+
+
+class SectorRelativeMetrics(BaseModel):
+    sector_etf: Optional[str] = None  # e.g., "XLK" for tech
+    sector_sentiment: Optional[float] = None
+    relative_sentiment: Optional[float] = None  # ticker_sentiment - sector_sentiment
+    percentile_vs_sector: Optional[float] = None  # 0-1 scale within sector
 
 
 class SentimentMetrics(BaseModel):
@@ -55,6 +75,8 @@ class SentimentMetrics(BaseModel):
     avg_sentiment: float
     sources_breakdown: dict
     filter_stats: Optional[FilterStats] = None
+    contrarian: Optional[ContrarianMetrics] = None
+    sector_relative: Optional[SectorRelativeMetrics] = None
 
 
 class TopicKeyword(BaseModel):
@@ -112,9 +134,11 @@ class HealthResponse(BaseModel):
     finnhub: str
     twitter: Optional[str] = None
     googlenews: Optional[str] = None
+    bingnews: Optional[str] = None
     secedgar: Optional[str] = None
     yahoofinance: Optional[str] = None
     finviz: Optional[str] = None
+    financialjuice: Optional[str] = None
     model_loaded: bool
 
 
@@ -128,6 +152,14 @@ class HistorySnapshot(BaseModel):
     positive_count: int
     negative_count: int
     neutral_count: int
+    # Contrarian metrics
+    contrarian_signal: Optional[str] = None
+    sentiment_percentile: Optional[float] = None
+    # Sector-relative metrics
+    sector_etf: Optional[str] = None
+    sector_sentiment: Optional[float] = None
+    relative_sentiment: Optional[float] = None
+    percentile_vs_sector: Optional[float] = None
 
 
 class HistoryResponse(BaseModel):

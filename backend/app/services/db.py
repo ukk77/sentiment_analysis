@@ -36,7 +36,16 @@ def init_db() -> None:
                 total_articles    INTEGER NOT NULL,
                 positive_count    INTEGER NOT NULL DEFAULT 0,
                 negative_count    INTEGER NOT NULL DEFAULT 0,
-                neutral_count     INTEGER NOT NULL DEFAULT 0
+                neutral_count     INTEGER NOT NULL DEFAULT 0,
+                -- Contrarian metrics
+                contrarian_signal TEXT,
+                sentiment_percentile REAL,
+                -- Sector-relative metrics
+                sector_etf        TEXT,
+                sector_sentiment  REAL,
+                relative_sentiment REAL,
+                percentile_vs_sector REAL,
+                session           TEXT
             )
         """)
         conn.execute(
@@ -44,6 +53,23 @@ def init_db() -> None:
             "ON sentiment_snapshots(ticker, captured_at)"
         )
         conn.commit()
+        # Migration: add new columns if they don't exist (for existing DBs)
+        _migrate_add_column(conn, "contrarian_signal", "TEXT")
+        _migrate_add_column(conn, "sentiment_percentile", "REAL")
+        _migrate_add_column(conn, "sector_etf", "TEXT")
+        _migrate_add_column(conn, "sector_sentiment", "REAL")
+        _migrate_add_column(conn, "relative_sentiment", "REAL")
+        _migrate_add_column(conn, "percentile_vs_sector", "REAL")
+        _migrate_add_column(conn, "session", "TEXT")
+
+
+def _migrate_add_column(conn: sqlite3.Connection, column: str, col_type: str) -> None:
+    """Add a column if it doesn't already exist."""
+    try:
+        conn.execute(f"ALTER TABLE sentiment_snapshots ADD COLUMN {column} {col_type}")
+        conn.commit()
+    except Exception:
+        pass  # column already exists
 
 
 def save_snapshot(
@@ -55,6 +81,13 @@ def save_snapshot(
     positive_count: int,
     negative_count: int,
     neutral_count: int,
+    session: str = "intraday",
+    contrarian_signal: str = None,
+    sentiment_percentile: float = None,
+    sector_etf: str = None,
+    sector_sentiment: float = None,
+    relative_sentiment: float = None,
+    percentile_vs_sector: float = None,
 ) -> None:
     """Persist one analysis snapshot for a ticker."""
     init_db()
@@ -64,12 +97,16 @@ def save_snapshot(
             """
             INSERT INTO sentiment_snapshots
               (ticker, captured_at, avg_sentiment, overall_sentiment,
-               confidence, total_articles, positive_count, negative_count, neutral_count)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+               confidence, total_articles, positive_count, negative_count, neutral_count,
+               session, contrarian_signal, sentiment_percentile,
+               sector_etf, sector_sentiment, relative_sentiment, percentile_vs_sector)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 ticker.upper(), captured_at, avg_sentiment, overall_sentiment,
                 confidence, total_articles, positive_count, negative_count, neutral_count,
+                session, contrarian_signal, sentiment_percentile,
+                sector_etf, sector_sentiment, relative_sentiment, percentile_vs_sector,
             ),
         )
         conn.commit()
@@ -82,7 +119,9 @@ def get_history(ticker: str, limit: int = 90) -> List[Dict]:
         rows = conn.execute(
             """
             SELECT ticker, captured_at, avg_sentiment, overall_sentiment, confidence,
-                   total_articles, positive_count, negative_count, neutral_count
+                   total_articles, positive_count, negative_count, neutral_count,
+                   contrarian_signal, sentiment_percentile,
+                   sector_etf, sector_sentiment, relative_sentiment, percentile_vs_sector
             FROM   sentiment_snapshots
             WHERE  UPPER(ticker) = UPPER(?)
             ORDER  BY captured_at DESC
