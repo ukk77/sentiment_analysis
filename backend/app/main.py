@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
@@ -14,6 +14,7 @@ from app.models.sentiment import (
     FilterStats,
     TopicKeyword,
     AnalystRatings,
+    AnalystRevisionMetrics,
     LeadLagPoint,
     PriceCorrelation,
     HistorySnapshot,
@@ -38,8 +39,10 @@ from app.services.enhanced_metrics import (
     compute_sector_relative_sentiment,
     create_contrarian_metrics,
     create_sector_relative_metrics,
+    compute_analyst_revision_velocity,
 )
 from app.services.sector_mapping import get_sector_etf
+from app.services.cache import sentiment_cache
 
 # Global instances
 analyzer = None
@@ -62,6 +65,13 @@ async def lifespan(app: FastAPI):
     # Startup
     print("Starting up... Loading model and clients")
     history_db.init_db()
+    # B4: Prune stale sentiment snapshots older than 90 days on each startup
+    try:
+        pruned = history_db.prune_old_snapshots(days=90)
+        if pruned:
+            print(f"[db_prune] Removed {pruned} snapshots older than 90 days")
+    except Exception as e:
+        print(f"[db_prune] Warning: {e}")
     try:
         analyzer = FinBERTAnalyzer()
         news_client = NewsAPIClient()
@@ -161,7 +171,7 @@ async def health_check():
 
 
 @app.post("/api/analyze", response_model=SentimentResponse)
-async def analyze_stock(request: AnalyzeRequest):
+async def analyze_stock(request: AnalyzeRequest, background_tasks: BackgroundTasks):
     """
     Analyze sentiment for a stock using news from multiple sources.
     
@@ -169,7 +179,14 @@ async def analyze_stock(request: AnalyzeRequest):
     - **company_name**: Company name (e.g., "Apple Inc.")
     
     Returns sentiment analysis with article breakdown.
+    Results are cached for 1 hour — repeat calls within that window return instantly.
     """
+    # ── TTL Cache check — return instantly on cache hit ───────────────────────
+    cache_key = f"{request.ticker.upper()}:{request.company_name or ''}"
+    cached = sentiment_cache.get(cache_key)
+    if cached is not None:
+        return cached
+
     if not analyzer or not analyzer.is_loaded:
         raise HTTPException(
             status_code=503,
@@ -395,12 +412,25 @@ async def analyze_stock(request: AnalyzeRequest):
         except Exception as e:
             print(f"Error extracting keywords: {e}")
 
-        # --- Analyst Ratings ---
+        # --- Analyst Ratings + Revision Velocity ---
         analyst_ratings = None
+        analyst_revision = None
         try:
             raw_ratings = yahoofinance_client.get_analyst_recommendations(request.ticker)
             if raw_ratings:
                 analyst_ratings = AnalystRatings(**raw_ratings)
+                # Save snapshot for revision velocity tracking
+                background_tasks.add_task(
+                    history_db.save_analyst_snapshot,
+                    ticker=request.ticker,
+                    recommendation=raw_ratings.get("recommendation"),
+                    target_mean=raw_ratings.get("target_mean_price"),
+                    num_analysts=raw_ratings.get("num_analysts", 0),
+                )
+            # Compute revision velocity from historical snapshots
+            analyst_history = history_db.get_analyst_history(request.ticker, days=10)
+            if len(analyst_history) >= 2:
+                analyst_revision = compute_analyst_revision_velocity(analyst_history)
         except Exception as e:
             print(f"Error fetching analyst ratings: {e}")
 
@@ -457,32 +487,7 @@ async def analyze_stock(request: AnalyzeRequest):
             price_data = None
             correlation = None
 
-        # --- Historical Tracking (SQLite, zero-config) ---
-        try:
-            # Extract contrarian and sector fields from metrics
-            contrarian = sentiment_metrics.contrarian
-            sector_rel = sentiment_metrics.sector_relative
-            
-            history_db.save_snapshot(
-                ticker=request.ticker,
-                avg_sentiment=metrics["average_score"],
-                overall_sentiment=metrics["overall_sentiment"],
-                confidence=metrics["confidence"],
-                total_articles=metrics["total"],
-                positive_count=metrics["positive"],
-                negative_count=metrics["negative"],
-                neutral_count=metrics["neutral"],
-                contrarian_signal=contrarian.signal.value if contrarian else None,
-                sentiment_percentile=contrarian.sentiment_percentile if contrarian else None,
-                sector_etf=sector_rel.sector_etf if sector_rel else None,
-                sector_sentiment=sector_rel.sector_sentiment if sector_rel else None,
-                relative_sentiment=sector_rel.relative_sentiment if sector_rel else None,
-                percentile_vs_sector=sector_rel.percentile_vs_sector if sector_rel else None,
-            )
-        except Exception as e:
-            print(f"Error saving history snapshot: {e}")
-
-        return SentimentResponse(
+        response = SentimentResponse(
             ticker=request.ticker,
             company_name=request.company_name,
             overall_sentiment=overall_sentiment,
@@ -492,9 +497,43 @@ async def analyze_stock(request: AnalyzeRequest):
             price_data=price_data,
             topics=topics,
             analyst_ratings=analyst_ratings,
+            analyst_revision=analyst_revision,
             correlation=correlation,
         )
-        
+
+        # ── Cache the result for 1 hour ───────────────────────────────────────
+        sentiment_cache.set(cache_key, response)
+
+        # ── Save DB snapshot in background (don't block HTTP response) ────────
+        _contrarian = sentiment_metrics.contrarian
+        _sector_rel = sentiment_metrics.sector_relative
+        _snap_kwargs = dict(
+            ticker=request.ticker,
+            avg_sentiment=metrics["average_score"],
+            overall_sentiment=metrics["overall_sentiment"],
+            confidence=metrics["confidence"],
+            total_articles=metrics["total"],
+            positive_count=metrics["positive"],
+            negative_count=metrics["negative"],
+            neutral_count=metrics["neutral"],
+            contrarian_signal=_contrarian.signal.value if _contrarian else None,
+            sentiment_percentile=_contrarian.sentiment_percentile if _contrarian else None,
+            sector_etf=_sector_rel.sector_etf if _sector_rel else None,
+            sector_sentiment=_sector_rel.sector_sentiment if _sector_rel else None,
+            relative_sentiment=_sector_rel.relative_sentiment if _sector_rel else None,
+            percentile_vs_sector=_sector_rel.percentile_vs_sector if _sector_rel else None,
+        )
+
+        def _save_snapshot(**kwargs):
+            try:
+                history_db.save_snapshot(**kwargs)
+            except Exception as e:
+                print(f"Error saving history snapshot: {e}")
+
+        background_tasks.add_task(_save_snapshot, **_snap_kwargs)
+
+        return response
+
     except HTTPException:
         raise
     except Exception as e:
@@ -503,6 +542,54 @@ async def analyze_stock(request: AnalyzeRequest):
             status_code=500,
             detail=f"Error analyzing sentiment: {str(e)}"
         )
+
+
+@app.post("/api/alerts")
+async def check_sentiment_alerts(tickers: list[str]):
+    """Check for major sentiment shifts (>0.3 delta) for a list of tickers.
+
+    Returns tickers that have triggered an alert based on their last two
+    sentiment snapshots. The harness can call this to pause trading on
+    news-event-driven sentiment spikes.
+
+    - **tickers**: List of ticker symbols to check (e.g. ["AAPL", "MSFT"])
+    """
+    alerts = []
+    for ticker in tickers:
+        try:
+            history = history_db.get_history(ticker.upper(), limit=3)
+            if len(history) < 2:
+                continue
+            latest_score = history[0].get("avg_sentiment", 0.0)
+            prev_score = history[1].get("avg_sentiment", 0.0)
+            delta = latest_score - prev_score
+            if abs(delta) >= 0.3:
+                alerts.append({
+                    "ticker": ticker.upper(),
+                    "delta": round(delta, 3),
+                    "direction": "positive" if delta > 0 else "negative",
+                    "latest_sentiment": round(latest_score, 3),
+                    "prev_sentiment": round(prev_score, 3),
+                    "captured_at": history[0].get("captured_at"),
+                    "alert": True,
+                })
+        except Exception as e:
+            print(f"[alerts] Error checking {ticker}: {e}")
+    return {"alerts": alerts, "count": len(alerts)}
+
+
+@app.get("/api/cache")
+async def cache_stats():
+    """Return TTL cache statistics (entries, keys, TTL)."""
+    return sentiment_cache.stats()
+
+
+@app.delete("/api/cache/{ticker}")
+async def cache_invalidate(ticker: str):
+    """Invalidate cached result for a specific ticker (forces fresh analysis on next call)."""
+    sentiment_cache.delete(f"{ticker.upper()}:")
+    sentiment_cache.delete(f"{ticker.upper()}")
+    return {"invalidated": ticker.upper()}
 
 
 @app.get("/api/sources")

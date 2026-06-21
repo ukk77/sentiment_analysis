@@ -98,6 +98,15 @@ class AnalystRatings(BaseModel):
     strong_sell: int = 0
 
 
+class AnalystRevisionMetrics(BaseModel):
+    velocity_7d: Optional[float] = None          # target_mean change over 7 days (absolute $)
+    velocity_7d_pct: Optional[float] = None       # target_mean % change over 7 days
+    recommendation_shift: Optional[str] = None   # e.g. "hold→buy", "buy→sell", or None if unchanged
+    upgrade_count_7d: int = 0                    # number of upward recommendation shifts in 7 days
+    downgrade_count_7d: int = 0                  # number of downward recommendation shifts in 7 days
+    snapshots_used: int = 0                      # how many historical snapshots were compared
+
+
 class LeadLagPoint(BaseModel):
     offset_days: int
     correlation: float
@@ -120,6 +129,7 @@ class SentimentResponse(BaseModel):
     price_data: Optional[StockPriceData] = None
     topics: Optional[List[TopicKeyword]] = None
     analyst_ratings: Optional[AnalystRatings] = None
+    analyst_revision: Optional[AnalystRevisionMetrics] = None
     correlation: Optional[PriceCorrelation] = None
 
 

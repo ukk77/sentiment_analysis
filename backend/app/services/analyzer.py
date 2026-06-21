@@ -5,6 +5,7 @@ from typing import List, Dict, Tuple
 from dataclasses import dataclass
 from app.utils.text import clean_text, truncate_text, deduplicate_articles
 from app.config import get_settings
+from app.services.article_filter import get_source_weight
 from huggingface_hub import login
 
 
@@ -207,24 +208,33 @@ class FinBERTAnalyzer:
         else:
             analyzed = analyzed_all
             relevance_dropped = 0
-        
-        # Calculate aggregated metrics
+
+        # Stamp source credibility weight onto each article
+        for article in analyzed:
+            article["source_weight"] = get_source_weight(article)
+
+        # Calculate aggregated metrics — use source-credibility weighted average
         total = len(analyzed)
         positive = sum(1 for a in analyzed if a["sentiment"] == "positive")
         negative = sum(1 for a in analyzed if a["sentiment"] == "negative")
         neutral = sum(1 for a in analyzed if a["sentiment"] == "neutral")
-        
-        # Calculate average sentiment score
+
+        # Credibility-weighted average sentiment score
+        weights = [a["source_weight"] for a in analyzed]
         scores = [a["sentiment_score"] for a in analyzed]
-        avg_score = np.mean(scores) if scores else 0.0
-        
-        # Compute impact score per article: |score - avg| * confidence, normalized to 0-1
-        # Max theoretical value is 2.0 (score=-1, avg=1, confidence=1), so divide by 2
+        total_weight = sum(weights)
+        if total_weight > 0:
+            avg_score = float(np.average(scores, weights=weights))
+        else:
+            avg_score = float(np.mean(scores)) if scores else 0.0
+
+        # Compute impact score per article: |score - avg| * confidence * source_weight, normalized to 0-1
         for article in analyzed:
             deviation = abs(article["sentiment_score"] - avg_score)
             confidence = article.get("confidence", 0.0)
-            article["impact_score"] = round(float(deviation * confidence / 2.0), 4)
-        
+            sw = article.get("source_weight", 1.0)
+            article["impact_score"] = round(float(deviation * confidence * sw / 2.0), 4)
+
         # Determine overall sentiment
         if avg_score > 0.1:
             overall = "positive"
@@ -232,7 +242,7 @@ class FinBERTAnalyzer:
             overall = "negative"
         else:
             overall = "neutral"
-        
+
         metrics = {
             "total": total,
             "positive": positive,

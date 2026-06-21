@@ -8,12 +8,14 @@ Free production alternatives if you outgrow SQLite:
   - Turso     (free tier SQLite edge, 9 GB)   https://turso.tech
   - PlanetScale (free tier MySQL)             https://planetscale.com
 """
+import os
 import sqlite3
 from pathlib import Path
-from typing import List, Dict
-from datetime import datetime
+from typing import List, Dict, Optional
+from datetime import datetime, timedelta, timezone
 
-DB_PATH = Path(__file__).resolve().parents[2] / "sentiment_history.db"
+_DEFAULT_DB = Path(__file__).resolve().parents[2] / "sentiment_history.db"
+DB_PATH = Path(os.environ.get("SENTIMENT_DB_PATH", str(_DEFAULT_DB)))
 
 
 def _get_conn() -> sqlite3.Connection:
@@ -51,6 +53,20 @@ def init_db() -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_ticker_date "
             "ON sentiment_snapshots(ticker, captured_at)"
+        )
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS analyst_history (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticker          TEXT    NOT NULL,
+                captured_at     TEXT    NOT NULL,
+                recommendation  TEXT,
+                target_mean     REAL,
+                num_analysts    INTEGER
+            )
+        """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_analyst_ticker_date "
+            "ON analyst_history(ticker, captured_at)"
         )
         conn.commit()
         # Migration: add new columns if they don't exist (for existing DBs)
@@ -110,6 +126,50 @@ def save_snapshot(
             ),
         )
         conn.commit()
+
+
+def save_analyst_snapshot(
+    ticker: str,
+    recommendation: Optional[str],
+    target_mean: Optional[float],
+    num_analysts: int,
+) -> None:
+    """Persist analyst rating snapshot for revision velocity tracking."""
+    init_db()
+    captured_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    with _get_conn() as conn:
+        conn.execute(
+            "INSERT INTO analyst_history (ticker, captured_at, recommendation, target_mean, num_analysts) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (ticker.upper(), captured_at, recommendation, target_mean, num_analysts),
+        )
+        conn.commit()
+
+
+def get_analyst_history(ticker: str, days: int = 10) -> List[Dict]:
+    """Return analyst snapshots for ticker from the last *days* days, newest first."""
+    init_db()
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    with _get_conn() as conn:
+        rows = conn.execute(
+            "SELECT ticker, captured_at, recommendation, target_mean, num_analysts "
+            "FROM analyst_history WHERE UPPER(ticker)=UPPER(?) AND captured_at >= ? "
+            "ORDER BY captured_at DESC",
+            (ticker.upper(), since),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def prune_old_snapshots(days: int = 90) -> int:
+    """Delete sentiment_snapshots older than *days* days. Returns number of rows deleted."""
+    init_db()
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    with _get_conn() as conn:
+        cur = conn.execute(
+            "DELETE FROM sentiment_snapshots WHERE captured_at < ?", (cutoff,)
+        )
+        conn.commit()
+    return cur.rowcount
 
 
 def get_history(ticker: str, limit: int = 90) -> List[Dict]:

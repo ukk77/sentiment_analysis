@@ -349,6 +349,64 @@ def passes_title_relevance(article: Dict, ticker: str, company_name: str) -> boo
     return False
 
 
+# ---------------------------------------------------------------------------
+# Source Credibility Weighting
+# Tier 1 (1.0x): Major financial newswires and premium outlets
+# Tier 2 (0.8x): Quality financial aggregators and analysis sites
+# Tier 3 (0.6x): Blogs, minor sites, social aggregators
+# Tier 4 (0.4x): Unknown / unverified sources
+# ---------------------------------------------------------------------------
+SOURCE_CREDIBILITY_TIERS: Dict[str, float] = {
+    # Tier 1
+    "reuters.com": 1.0, "bloomberg.com": 1.0, "wsj.com": 1.0,
+    "ft.com": 1.0, "cnbc.com": 1.0, "barrons.com": 1.0,
+    "apnews.com": 1.0, "ap.org": 1.0,
+    # Tier 2
+    "marketwatch.com": 0.8, "investors.com": 0.8, "thestreet.com": 0.8,
+    "forbes.com": 0.8, "fortune.com": 0.8, "businessinsider.com": 0.8,
+    "finance.yahoo.com": 0.8, "yahoo.com": 0.8, "morningstar.com": 0.8,
+    "investing.com": 0.8, "nasdaq.com": 0.8, "tipranks.com": 0.8,
+    "seekingalpha.com": 0.8, "fool.com": 0.8, "zacks.com": 0.8,
+    "businesswire.com": 0.8, "prnewswire.com": 0.8, "globenewswire.com": 0.8,
+    "nytimes.com": 0.8, "washingtonpost.com": 0.8,
+    "foxbusiness.com": 0.8, "economist.com": 0.8,
+    # Tier 3
+    "benzinga.com": 0.6, "stockstotrade.com": 0.6, "simplywall.st": 0.6,
+    "techcrunch.com": 0.6, "theverge.com": 0.6, "arstechnica.com": 0.6,
+    "bbc.com": 0.6, "cnn.com": 0.6, "axios.com": 0.6,
+    "financialpost.com": 0.6, "theglobeandmail.com": 0.6,
+    "kiplinger.com": 0.6, "investopedia.com": 0.6,
+}
+
+_TIER4_WEIGHT = 0.4  # default for unrecognized domains
+
+
+def get_source_weight(article: Dict) -> float:
+    """Return a credibility multiplier (0.4–1.0) for an article based on its source domain."""
+    domain = _get_domain(article.get("url", ""))
+    if domain:
+        # Exact match
+        if domain in SOURCE_CREDIBILITY_TIERS:
+            return SOURCE_CREDIBILITY_TIERS[domain]
+        # Parent domain match (e.g. finance.yahoo.com → yahoo.com)
+        parts = domain.split(".")
+        for i in range(1, len(parts) - 1):
+            candidate = ".".join(parts[i:])
+            if candidate in SOURCE_CREDIBILITY_TIERS:
+                return SOURCE_CREDIBILITY_TIERS[candidate]
+    # Fallback: check publisher name for Google News articles only
+    # Use strict equality against known publisher names (no substring match to avoid false positives)
+    publisher = (article.get("source") or "").lower().strip()
+    if publisher:
+        for key, weight in SOURCE_CREDIBILITY_TIERS.items():
+            pub_name = key.split(".")[0]  # e.g. "reuters" from "reuters.com"
+            # Only match if pub_name is at least 5 chars (avoids short accidental matches)
+            # and publisher exactly equals the pub_name OR the full domain key
+            if len(pub_name) >= 5 and (publisher == pub_name or publisher == key):
+                return weight
+    return _TIER4_WEIGHT
+
+
 def filter_articles(
     articles: List[Dict],
     ticker: str,

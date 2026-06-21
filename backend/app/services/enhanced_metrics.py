@@ -5,8 +5,74 @@ Provides contrarian signal detection and sector-relative sentiment analysis.
 from typing import Optional, List, Dict, Any
 from dataclasses import dataclass
 
-from ..models.sentiment import ContrarianSignal, ContrarianMetrics, SectorRelativeMetrics
+from ..models.sentiment import (
+    ContrarianSignal, ContrarianMetrics, SectorRelativeMetrics, AnalystRevisionMetrics,
+)
 from .sector_mapping import get_sector_etf, get_tickers_in_sector
+
+# Recommendation tier map — higher = more bullish
+_REC_TIER: Dict[str, int] = {
+    "strong_sell": 0, "sell": 1, "underperform": 1,
+    "hold": 2, "neutral": 2, "market_perform": 2,
+    "buy": 3, "outperform": 3, "overweight": 3,
+    "strong_buy": 4,
+}
+
+
+def compute_analyst_revision_velocity(
+    snapshots: List[Dict],
+) -> AnalystRevisionMetrics:
+    """Compute analyst revision velocity from a list of analyst_history snapshots.
+
+    Args:
+        snapshots: List of dicts from db.get_analyst_history(), newest first.
+
+    Returns:
+        AnalystRevisionMetrics with velocity and shift counts.
+    """
+    if not snapshots:
+        return AnalystRevisionMetrics(snapshots_used=0)
+
+    latest = snapshots[0]
+    oldest = snapshots[-1]
+
+    # Target price velocity
+    latest_target = latest.get("target_mean")
+    oldest_target = oldest.get("target_mean")
+    velocity_7d: Optional[float] = None
+    velocity_7d_pct: Optional[float] = None
+    if latest_target is not None and oldest_target is not None and oldest_target != 0:
+        velocity_7d = round(latest_target - oldest_target, 2)
+        velocity_7d_pct = round((latest_target - oldest_target) / abs(oldest_target) * 100, 2)
+
+    # Recommendation shift detection (oldest → latest)
+    latest_rec = (latest.get("recommendation") or "").lower().strip()
+    oldest_rec = (oldest.get("recommendation") or "").lower().strip()
+    recommendation_shift: Optional[str] = None
+    if latest_rec and oldest_rec and latest_rec != oldest_rec:
+        recommendation_shift = f"{oldest_rec}\u2192{latest_rec}"
+
+    # Count upgrades/downgrades across consecutive snapshots
+    upgrade_count = 0
+    downgrade_count = 0
+    for i in range(len(snapshots) - 1):
+        newer_rec = (snapshots[i].get("recommendation") or "").lower().strip()
+        older_rec = (snapshots[i + 1].get("recommendation") or "").lower().strip()
+        newer_tier = _REC_TIER.get(newer_rec, 2)
+        older_tier = _REC_TIER.get(older_rec, 2)
+        if newer_tier > older_tier:
+            upgrade_count += 1
+        elif newer_tier < older_tier:
+            downgrade_count += 1
+
+    return AnalystRevisionMetrics(
+        velocity_7d=velocity_7d,
+        velocity_7d_pct=velocity_7d_pct,
+        recommendation_shift=recommendation_shift,
+        upgrade_count_7d=upgrade_count,
+        downgrade_count_7d=downgrade_count,
+        snapshots_used=len(snapshots),
+    )
 
 
 @dataclass
