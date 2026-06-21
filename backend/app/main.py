@@ -1,3 +1,4 @@
+import asyncio
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
@@ -55,6 +56,34 @@ secedgar_client = None
 yahoofinance_client = None
 finviz_client = None
 financial_juice_client = None
+
+_SOURCE_LABELS = {
+    "newsapi": "NewsAPI",
+    "finnhub": "Finnhub",
+    "googlenews": "Google News",
+    "bingnews": "Bing News",
+    "yahoofinance": "Yahoo Finance",
+    "finviz": "Finviz",
+    "secedgar": "SEC EDGAR",
+    "financialjuice": "FinancialJuice",
+    "twitter": "Twitter",
+}
+
+
+async def _run_source_call(label, func, *args, **kwargs):
+    try:
+        return await asyncio.to_thread(func, *args, **kwargs)
+    except Exception as e:
+        print(f"Error fetching {label}: {e}")
+        return []
+
+
+def _format_article_source(article):
+    publisher = (article.get("source") or "").strip()
+    collector = _SOURCE_LABELS.get(article.get("_source"), article.get("_source") or "Unknown")
+    if publisher and publisher.lower() != collector.lower():
+        return f"{collector} | {publisher}"
+    return publisher or collector
 
 
 @asynccontextmanager
@@ -194,58 +223,81 @@ async def analyze_stock(request: AnalyzeRequest, background_tasks: BackgroundTas
         )
     
     try:
-        # Fetch news from all sources
-        newsapi_articles = news_client.get_company_news(
-            ticker=request.ticker,
-            company_name=request.company_name,
-            days_back=7,
-            max_articles=20
-        )
-        
-        finnhub_articles = finnhub_client.get_company_news(
-            ticker=request.ticker,
-            days_back=7
-        )
-        
-        googlenews_articles = googlenews_client.search_news(
-            ticker=request.ticker,
-            company_name=request.company_name,
-            max_articles=20
-        )
-        
-        bingnews_articles = bingnews_client.search_news(
-            ticker=request.ticker,
-            company_name=request.company_name,
-            max_articles=20
-        )
-        
-        yahoofinance_articles = yahoofinance_client.get_news(
-            ticker=request.ticker,
-            max_articles=20
-        )
-        
-        finviz_articles = finviz_client.get_news(
-            ticker=request.ticker
-        )
-        
-        secedgar_articles = secedgar_client.get_deep_dive_filings(
-            ticker=request.ticker
-        )
-        
-        financialjuice_articles = financial_juice_client.get_company_news(
-            ticker=request.ticker,
-            company_name=request.company_name,
-            max_articles=20
-        )
-        
-        # Get Twitter data if configured
-        twitter_articles = []
-        if twitter_client.is_configured():
-            twitter_articles = twitter_client.search_tweets(
+        source_tasks = {
+            "newsapi": asyncio.create_task(_run_source_call(
+                "newsapi",
+                news_client.get_company_news,
                 ticker=request.ticker,
                 company_name=request.company_name,
-                max_results=25
-            )
+                days_back=7,
+                max_articles=20,
+            )),
+            "finnhub": asyncio.create_task(_run_source_call(
+                "finnhub",
+                finnhub_client.get_company_news,
+                ticker=request.ticker,
+                days_back=7,
+            )),
+            "googlenews": asyncio.create_task(_run_source_call(
+                "googlenews",
+                googlenews_client.search_news,
+                ticker=request.ticker,
+                company_name=request.company_name,
+                max_articles=20,
+            )),
+            "bingnews": asyncio.create_task(_run_source_call(
+                "bingnews",
+                bingnews_client.search_news,
+                ticker=request.ticker,
+                company_name=request.company_name,
+                max_articles=20,
+            )),
+            "yahoofinance": asyncio.create_task(_run_source_call(
+                "yahoofinance",
+                yahoofinance_client.get_news,
+                ticker=request.ticker,
+                max_articles=20,
+            )),
+            "finviz": asyncio.create_task(_run_source_call(
+                "finviz",
+                finviz_client.get_news,
+                ticker=request.ticker,
+            )),
+            "secedgar": asyncio.create_task(_run_source_call(
+                "secedgar",
+                secedgar_client.get_deep_dive_filings,
+                ticker=request.ticker,
+            )),
+            "financialjuice": asyncio.create_task(_run_source_call(
+                "financialjuice",
+                financial_juice_client.get_company_news,
+                ticker=request.ticker,
+                company_name=request.company_name,
+                max_articles=20,
+            )),
+        }
+        if twitter_client.is_configured():
+            source_tasks["twitter"] = asyncio.create_task(_run_source_call(
+                "twitter",
+                twitter_client.search_tweets,
+                ticker=request.ticker,
+                company_name=request.company_name,
+                max_results=25,
+            ))
+
+        source_results = {
+            name: await task for name, task in source_tasks.items()
+        }
+
+        newsapi_articles = source_results.get("newsapi", [])
+        finnhub_articles = source_results.get("finnhub", [])
+        googlenews_articles = source_results.get("googlenews", [])
+        bingnews_articles = source_results.get("bingnews", [])
+        yahoofinance_articles = source_results.get("yahoofinance", [])
+        finviz_articles = source_results.get("finviz", [])
+        secedgar_articles = source_results.get("secedgar", [])
+        financialjuice_articles = source_results.get("financialjuice", [])
+        twitter_articles = source_results.get("twitter", [])
         
         # Add source tracking
         for article in newsapi_articles:
@@ -324,7 +376,7 @@ async def analyze_stock(request: AnalyzeRequest, background_tasks: BackgroundTas
         response_articles = []
         for article in analyzed_articles:
             title = article.get("title") or ""
-            source = article.get("source") or "Unknown"
+            source = _format_article_source(article)
             published_at = article.get("published_at") or ""
             url = article.get("url") or ""
             description = article.get("description") or ""
@@ -412,11 +464,28 @@ async def analyze_stock(request: AnalyzeRequest, background_tasks: BackgroundTas
         except Exception as e:
             print(f"Error extracting keywords: {e}")
 
+        analyst_ratings_task = asyncio.create_task(_run_source_call(
+            "analyst_ratings",
+            yahoofinance_client.get_analyst_recommendations,
+            request.ticker,
+        ))
+        price_history_task = asyncio.create_task(_run_source_call(
+            "price_history",
+            yahoofinance_client.get_price_history,
+            request.ticker,
+            period="1mo",
+        ))
+        ticker_info_task = asyncio.create_task(_run_source_call(
+            "ticker_info",
+            yahoofinance_client.get_ticker_info,
+            request.ticker,
+        ))
+
         # --- Analyst Ratings + Revision Velocity ---
         analyst_ratings = None
         analyst_revision = None
         try:
-            raw_ratings = yahoofinance_client.get_analyst_recommendations(request.ticker)
+            raw_ratings = await analyst_ratings_task
             if raw_ratings:
                 analyst_ratings = AnalystRatings(**raw_ratings)
                 # Save snapshot for revision velocity tracking
@@ -438,9 +507,9 @@ async def analyze_stock(request: AnalyzeRequest, background_tasks: BackgroundTas
         price_data = None
         correlation = None
         try:
-            price_history = yahoofinance_client.get_price_history(request.ticker, period="1mo")
+            price_history = await price_history_task
             if price_history:
-                ticker_info = yahoofinance_client.get_ticker_info(request.ticker)
+                ticker_info = await ticker_info_task
                 current_price = ticker_info.get("price", 0) if ticker_info else 0
 
                 if len(price_history) >= 2:
