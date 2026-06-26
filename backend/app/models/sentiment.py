@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 from datetime import datetime
 from enum import Enum
 
@@ -124,6 +124,7 @@ class SentimentResponse(BaseModel):
     company_name: str
     overall_sentiment: SentimentLabel
     confidence: float
+    low_coverage: bool = False
     metrics: SentimentMetrics
     articles: List[ArticleSentiment]
     price_data: Optional[StockPriceData] = None
@@ -176,3 +177,16 @@ class HistoryResponse(BaseModel):
     ticker: str
     snapshots: List[HistorySnapshot]
     count: int
+
+
+class ComprehensiveAnalysisRequest(BaseModel):
+    ticker: str
+    company_name: Optional[str] = None
+
+
+class ComprehensiveAnalysisResponse(BaseModel):
+    ticker: str
+    generated_at: str
+    current_data: Dict[str, Any]
+    deep_research: Dict[str, Any]
+    news_check: Dict[str, Any]

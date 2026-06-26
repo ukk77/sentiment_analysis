@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     NEWS_API_KEY: str
     FINNHUB_API_KEY: str
     HF_TOKEN: str = ""  # Optional, for Hugging Face authenticated requests
-    
+
     class Config:
         env_file = ENV_PATH
 

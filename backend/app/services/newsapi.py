@@ -4,7 +4,7 @@ from typing import List, Dict, Optional
 from app.config import get_settings
 
 
-_rate_limited = False  # module-level flag: set True on first 429, skips rest of batch
+_rate_limited_until: Optional[datetime] = None  # auto-resets after 1 hour
 
 
 class NewsAPIClient:
@@ -51,15 +51,15 @@ class NewsAPIClient:
             "apiKey": self.api_key
         }
         
-        global _rate_limited
-        if _rate_limited:
+        global _rate_limited_until
+        if _rate_limited_until is not None and datetime.now() < _rate_limited_until:
             return []
 
         try:
             response = requests.get(self.BASE_URL, params=params, timeout=30)
             if response.status_code == 429:
-                _rate_limited = True
-                print("Error fetching NewsAPI data: 429 Too Many Requests — quota exhausted, skipping NewsAPI for remainder of batch")
+                _rate_limited_until = datetime.now() + timedelta(hours=1)
+                print("Error fetching NewsAPI data: 429 Too Many Requests — quota exhausted, pausing NewsAPI for 1 hour")
                 return []
             response.raise_for_status()
             

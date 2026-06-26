@@ -50,7 +50,7 @@ def compute_analyst_revision_velocity(
     oldest_rec = (oldest.get("recommendation") or "").lower().strip()
     recommendation_shift: Optional[str] = None
     if latest_rec and oldest_rec and latest_rec != oldest_rec:
-        recommendation_shift = f"{oldest_rec}\u2192{latest_rec}"
+        recommendation_shift = f"{oldest_rec} -> {latest_rec}"
 
     # Count upgrades/downgrades across consecutive snapshots
     upgrade_count = 0

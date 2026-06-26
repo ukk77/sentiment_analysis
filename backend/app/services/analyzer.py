@@ -191,11 +191,58 @@ class FinBERTAnalyzer:
         # Deduplicate first (legacy basic dedup; stronger filter runs upstream)
         unique_articles = deduplicate_articles(articles)
 
-        # Analyze each article
-        analyzed_all = []
+        # Build texts for batch inference
+        labels_map = ["positive", "negative", "neutral"]
+        texts = []
         for article in unique_articles:
-            analyzed_article = self.analyze_article(article)
-            analyzed_all.append(analyzed_article)
+            title = article.get("title", "")
+            description = article.get("description", "")
+            content = article.get("content", "")
+            text = f"{title}. {description}"
+            if content and len(content) > 50:
+                text += f" {content}"
+            texts.append(truncate_text(clean_text(text), max_length=512))
+
+        # Batch FinBERT inference — ceil(N/16) forward passes instead of N
+        _BATCH = 16
+        sentiment_results: List[SentimentResult] = []
+        try:
+            for i in range(0, len(texts), _BATCH):
+                batch = texts[i : i + _BATCH]
+                inputs = self.tokenizer(
+                    batch, return_tensors="pt", truncation=True,
+                    max_length=512, padding=True,
+                )
+                inputs = {k: v.to(self.device) for k, v in inputs.items()}
+                with torch.no_grad():
+                    outputs = self.model(**inputs)
+                    probs = torch.nn.functional.softmax(outputs.logits, dim=-1).cpu().numpy()
+                for prob in probs:
+                    best_idx = int(prob.argmax())
+                    label = labels_map[best_idx]
+                    confidence = float(prob[best_idx])
+                    if label == "positive":
+                        score = confidence
+                    elif label == "negative":
+                        score = -confidence
+                    else:
+                        score = 0.0
+                    sentiment_results.append(SentimentResult(label=label, score=score, confidence=confidence))
+        except Exception as e:
+            print(f"Batch inference failed, falling back to per-article: {e}")
+            sentiment_results = []
+            for text in texts:
+                sentiment_results.append(self.analyze_text(text))
+
+        # Attach sentiment data to articles
+        analyzed_all = []
+        for article, sent in zip(unique_articles, sentiment_results):
+            analyzed_all.append({
+                **article,
+                "sentiment": sent.label,
+                "sentiment_score": sent.score,
+                "confidence": sent.confidence,
+            })
 
         # FinBERT relevance pre-filter: drop articles where the model is
         # uncertain (max prob < threshold). These are typically off-topic
@@ -242,6 +289,11 @@ class FinBERTAnalyzer:
             overall = "negative"
         else:
             overall = "neutral"
+            
+        low_coverage = total < 3
+        confidence = float(np.mean([a["confidence"] for a in analyzed])) if analyzed else 0.0
+        if low_coverage:
+            confidence = min(confidence, 0.4) # cap confidence if few articles
 
         metrics = {
             "total": total,
@@ -250,8 +302,9 @@ class FinBERTAnalyzer:
             "neutral": neutral,
             "average_score": float(avg_score),
             "overall_sentiment": overall,
-            "confidence": float(np.mean([a["confidence"] for a in analyzed])) if analyzed else 0.0,
+            "confidence": confidence,
             "relevance_dropped": relevance_dropped,
+            "low_coverage": low_coverage,
         }
         
         return analyzed, metrics

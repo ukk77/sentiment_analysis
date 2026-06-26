@@ -1,5 +1,5 @@
 import asyncio
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, status
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
@@ -20,6 +20,8 @@ from app.models.sentiment import (
     PriceCorrelation,
     HistorySnapshot,
     HistoryResponse,
+    ComprehensiveAnalysisRequest,
+    ComprehensiveAnalysisResponse,
 )
 from app.services.newsapi import NewsAPIClient
 from app.services.finnhub import FinnhubClient
@@ -44,6 +46,7 @@ from app.services.enhanced_metrics import (
 )
 from app.services.sector_mapping import get_sector_etf
 from app.services.cache import sentiment_cache
+from app.services import comprehensive_analysis as comprehensive
 
 # Global instances
 analyzer = None
@@ -141,10 +144,12 @@ app = FastAPI(
 )
 
 # CORS middleware
+# allow_credentials=True is incompatible with allow_origins=["*"] per the CORS spec;
+# browsers reject such responses. Use allow_credentials=False with wildcard origin.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # For development - restrict in production
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -419,17 +424,9 @@ async def analyze_stock(request: AnalyzeRequest, background_tasks: BackgroundTas
         )
         contrarian_metrics = create_contrarian_metrics(contrarian_result)
         
-        # Sector-relative metrics (requires sector sentiment data - simplified for single ticker)
-        # For a single ticker request, we compute what we can without fetching sector ETFs
-        sector_etf = get_sector_etf(request.ticker)
+        # Sector-relative metrics require cross-ticker sector sentiment data which
+        # is not fetched in single-ticker requests — leave as None until implemented.
         sector_relative_metrics = None
-        if sector_etf:
-            sector_relative_result = compute_sector_relative_sentiment(
-                ticker=request.ticker,
-                ticker_sentiment=metrics["average_score"],
-                sector_sentiments={},  # Would be populated with pre-fetched sector data
-            )
-            sector_relative_metrics = create_sector_relative_metrics(sector_relative_result)
         
         sentiment_metrics = SentimentMetrics(
             total_articles=metrics["total"],
@@ -561,6 +558,7 @@ async def analyze_stock(request: AnalyzeRequest, background_tasks: BackgroundTas
             company_name=request.company_name,
             overall_sentiment=overall_sentiment,
             confidence=confidence,
+            low_coverage=metrics.get("low_coverage", False),
             metrics=sentiment_metrics,
             articles=response_articles,
             price_data=price_data,
@@ -746,6 +744,37 @@ async def get_sentiment_history(ticker: str, limit: int = 90):
     except Exception as e:
         print(f"Error fetching history for {ticker}: {e}")
         raise HTTPException(status_code=500, detail=f"Error fetching history: {str(e)}")
+
+
+@app.post("/api/comprehensive", response_model=ComprehensiveAnalysisResponse)
+async def comprehensive_analysis(
+    request: ComprehensiveAnalysisRequest,
+):
+    """Run a comprehensive deep-dive report on a single ticker.
+
+    This endpoint is meant to be invoked through the harness CLI only. It returns:
+
+    - **current_data**: live price, bid/ask, volume vs average, 52-week range
+    - **deep_research**: revenue/earnings trend, balance sheet, competitors, risks,
+      business operations, and future growth outlook
+    - **news_check**: recent material news and developments
+    """
+    try:
+        if yahoofinance_client is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Yahoo Finance client is not available.",
+            )
+        report = comprehensive.run_comprehensive_analysis(request.ticker, yahoofinance_client)
+        return ComprehensiveAnalysisResponse(**report)
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error in comprehensive analysis for {request.ticker}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Comprehensive analysis failed: {str(e)}",
+        )
 
 
 if __name__ == "__main__":
