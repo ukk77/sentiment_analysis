@@ -8,6 +8,7 @@ Free production alternatives if you outgrow SQLite:
   - Turso     (free tier SQLite edge, 9 GB)   https://turso.tech
   - PlanetScale (free tier MySQL)             https://planetscale.com
 """
+import hashlib
 import os
 import sqlite3
 from pathlib import Path
@@ -67,6 +68,35 @@ def init_db() -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_analyst_ticker_date "
             "ON analyst_history(ticker, captured_at)"
+        )
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS article_sentiments (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticker         TEXT    NOT NULL,
+                captured_at    TEXT    NOT NULL,
+                published_at   TEXT,
+                collector      TEXT,
+                source         TEXT,
+                title          TEXT    NOT NULL,
+                summary        TEXT,
+                url            TEXT,
+                sentiment      TEXT    NOT NULL,
+                score          REAL,
+                confidence     REAL,
+                impact_score   REAL,
+                source_weight  REAL,
+                event_type     TEXT,
+                url_hash       TEXT    NOT NULL,
+                UNIQUE(ticker, url_hash)
+            )
+        """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_article_ticker_pub "
+            "ON article_sentiments(ticker, published_at)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_article_captured "
+            "ON article_sentiments(captured_at)"
         )
         conn.commit()
         # Migration: add new columns if they don't exist (for existing DBs)
@@ -190,3 +220,103 @@ def get_history(ticker: str, limit: int = 90) -> List[Dict]:
             (ticker.upper(), limit),
         ).fetchall()
     return [dict(row) for row in rows]
+
+
+def _url_hash(url: Optional[str], title: str) -> str:
+    """Stable dedup key: sha1 of the URL, or the title if no URL is present."""
+    basis = (url or title or "").strip().lower()
+    return hashlib.sha1(basis.encode("utf-8")).hexdigest()
+
+
+def save_articles(ticker: str, articles: List[Dict]) -> int:
+    """Persist analyzed articles for *ticker*, deduped on (ticker, url_hash).
+
+    Each item in *articles* is expected to carry the same fields already
+    used to build the API response: title, source (formatted), published_at,
+    sentiment, sentiment_score, url, description, impact_score,
+    source_weight, and optionally event_type. Missing fields default safely.
+
+    Returns the number of new rows actually inserted (duplicates are ignored).
+    """
+    if not articles:
+        return 0
+    init_db()
+    captured_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    rows = []
+    for a in articles:
+        title = a.get("title") or ""
+        url = a.get("url") or ""
+        summary = (a.get("summary") or a.get("description") or "")[:200]
+        rows.append((
+            ticker.upper(),
+            captured_at,
+            a.get("published_at") or "",
+            a.get("collector") or a.get("_source") or "",
+            a.get("source") or "",
+            title,
+            summary,
+            url,
+            a.get("sentiment") or "neutral",
+            a.get("score") if a.get("score") is not None else a.get("sentiment_score"),
+            a.get("confidence"),
+            a.get("impact_score"),
+            a.get("source_weight"),
+            a.get("event_type"),
+            _url_hash(url, title),
+        ))
+    with _get_conn() as conn:
+        cur = conn.executemany(
+            """
+            INSERT OR IGNORE INTO article_sentiments
+              (ticker, captured_at, published_at, collector, source, title,
+               summary, url, sentiment, score, confidence, impact_score,
+               source_weight, event_type, url_hash)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            rows,
+        )
+        conn.commit()
+    return cur.rowcount if cur.rowcount is not None and cur.rowcount >= 0 else 0
+
+
+def prune_old_articles(days: int = 10) -> int:
+    """Delete article_sentiments rows older than *days* days (by captured_at)."""
+    init_db()
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    with _get_conn() as conn:
+        cur = conn.execute(
+            "DELETE FROM article_sentiments WHERE captured_at < ?", (cutoff,)
+        )
+        conn.commit()
+    return cur.rowcount
+
+
+def get_articles(ticker: str, days: int = 10) -> List[Dict]:
+    """Return persisted articles for *ticker* captured in the last *days* days."""
+    init_db()
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    with _get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT ticker, captured_at, published_at, collector, source, title,
+                   summary, url, sentiment, score, confidence, impact_score,
+                   source_weight, event_type, url_hash
+            FROM   article_sentiments
+            WHERE  UPPER(ticker) = UPPER(?) AND captured_at >= ?
+            ORDER  BY published_at DESC
+            """,
+            (ticker.upper(), since),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def prune_old_analyst(days: int = 90) -> int:
+    """Delete analyst_history rows older than *days* days. Returns rows deleted."""
+    init_db()
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    with _get_conn() as conn:
+        cur = conn.execute(
+            "DELETE FROM analyst_history WHERE captured_at < ?", (cutoff,)
+        )
+        conn.commit()
+    return cur.rowcount

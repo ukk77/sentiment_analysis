@@ -34,6 +34,7 @@ from app.services.finviz import FinvizClient
 from app.services.financialjuice import FinancialJuiceClient
 from app.services.analyzer import FinBERTAnalyzer
 from app.services.article_filter import filter_articles
+from app.services.event_tagger import classify_event_batch
 from app.services import db as history_db
 from app.services.keywords import extract_keywords
 from app.services.correlation import compute_correlation
@@ -104,6 +105,20 @@ async def lifespan(app: FastAPI):
             print(f"[db_prune] Removed {pruned} snapshots older than 90 days")
     except Exception as e:
         print(f"[db_prune] Warning: {e}")
+    # Phase 4 Step 1 (A0a): Prune persisted articles older than 10 days
+    try:
+        pruned_articles = history_db.prune_old_articles(days=10)
+        if pruned_articles:
+            print(f"[db_prune] Removed {pruned_articles} articles older than 10 days")
+    except Exception as e:
+        print(f"[db_prune] Warning (articles): {e}")
+    # Phase 4 Step 1 (A0a): Cap unbounded analyst_history at 90 days
+    try:
+        pruned_analyst = history_db.prune_old_analyst(days=90)
+        if pruned_analyst:
+            print(f"[db_prune] Removed {pruned_analyst} analyst snapshots older than 90 days")
+    except Exception as e:
+        print(f"[db_prune] Warning (analyst): {e}")
     try:
         analyzer = FinBERTAnalyzer()
         news_client = NewsAPIClient()
@@ -376,7 +391,11 @@ async def analyze_stock(request: AnalyzeRequest, background_tasks: BackgroundTas
         # Surface filter stats alongside analyzer metrics
         metrics["filter_stats"] = filter_stats
         metrics["finbert_relevance_dropped"] = metrics.get("relevance_dropped", 0)
-        
+
+        # Phase 4 Step 1 (A1): classify each article into a coarse event type
+        # (earnings, m_and_a, legal, guidance, analyst, insider, product, macro, other).
+        classify_event_batch(analyzed_articles)
+
         # Build response articles
         response_articles = []
         for article in analyzed_articles:
@@ -399,6 +418,34 @@ async def analyze_stock(request: AnalyzeRequest, background_tasks: BackgroundTas
         
         # Sort by published date (most recent first)
         response_articles.sort(key=lambda x: x.published_at or "", reverse=True)
+
+        # Phase 4 Step 1 (A0a): persist analyzed articles for RAG/analytics.
+        # Uses the same field extraction as response_articles above.
+        def _save_articles(ticker: str, articles: list):
+            try:
+                to_persist = []
+                for article in articles:
+                    to_persist.append({
+                        "title": article.get("title") or "",
+                        "url": article.get("url") or "",
+                        "published_at": article.get("published_at") or "",
+                        "collector": article.get("_source") or "",
+                        "source": _format_article_source(article),
+                        "summary": (article.get("description") or "")[:200],
+                        "sentiment": article.get("sentiment", "neutral"),
+                        "score": article.get("sentiment_score", 0.0),
+                        "confidence": article.get("confidence"),
+                        "impact_score": article.get("impact_score", 0.0),
+                        "source_weight": article.get("source_weight"),
+                        "event_type": article.get("event_type"),
+                    })
+                inserted = history_db.save_articles(ticker=ticker, articles=to_persist)
+                if inserted:
+                    print(f"[article_persist] {ticker}: inserted {inserted} new article(s)")
+            except Exception as e:
+                print(f"Error saving articles: {e}")
+
+        background_tasks.add_task(_save_articles, ticker=request.ticker, articles=analyzed_articles)
         
         # Calculate sources breakdown
         sources_breakdown = {
@@ -424,9 +471,25 @@ async def analyze_stock(request: AnalyzeRequest, background_tasks: BackgroundTas
         )
         contrarian_metrics = create_contrarian_metrics(contrarian_result)
         
-        # Sector-relative metrics require cross-ticker sector sentiment data which
-        # is not fetched in single-ticker requests — leave as None until implemented.
+        # Phase 4 Step 1 (A0b): populate sector-relative sentiment using the
+        # sector ETF's most recent persisted snapshot as the baseline, rather
+        # than making N live calls. Gracefully leaves None if the ticker has
+        # no sector mapping or the ETF has no recent snapshot yet.
         sector_relative_metrics = None
+        try:
+            sector_etf = get_sector_etf(request.ticker)
+            if sector_etf:
+                etf_history = history_db.get_history(sector_etf, limit=1)
+                if etf_history:
+                    sector_sentiments = {sector_etf: etf_history[0]["avg_sentiment"]}
+                    sector_result = compute_sector_relative_sentiment(
+                        ticker=request.ticker,
+                        ticker_sentiment=metrics["average_score"],
+                        sector_sentiments=sector_sentiments,
+                    )
+                    sector_relative_metrics = create_sector_relative_metrics(sector_result)
+        except Exception as e:
+            print(f"Error computing sector-relative sentiment: {e}")
         
         sentiment_metrics = SentimentMetrics(
             total_articles=metrics["total"],

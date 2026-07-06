@@ -1,4 +1,5 @@
 from transformers import AutoTokenizer, AutoModelForSequenceClassification, pipeline
+import os
 import torch
 import numpy as np
 from typing import List, Dict, Tuple
@@ -29,6 +30,9 @@ class FinBERTAnalyzer:
         self.model = None
         self.classifier = None
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # Phase 4 Step 1 (A5): temperature scaling to soften FinBERT's
+        # typically overconfident softmax. T > 1 flattens the distribution.
+        self.temperature = float(os.environ.get("FINBERT_TEMPERATURE", "1.5"))
         self._load_model()
     
     def _load_model(self):
@@ -94,7 +98,7 @@ class FinBERTAnalyzer:
             
             with torch.no_grad():
                 outputs = self.model(**inputs)
-                probs = torch.nn.functional.softmax(outputs.logits, dim=-1)
+                probs = torch.nn.functional.softmax(outputs.logits / self.temperature, dim=-1)
                 probs = probs.cpu().numpy()[0]
             
             # FinBERT labels: 0=positive, 1=negative, 2=neutral
@@ -216,7 +220,7 @@ class FinBERTAnalyzer:
                 inputs = {k: v.to(self.device) for k, v in inputs.items()}
                 with torch.no_grad():
                     outputs = self.model(**inputs)
-                    probs = torch.nn.functional.softmax(outputs.logits, dim=-1).cpu().numpy()
+                    probs = torch.nn.functional.softmax(outputs.logits / self.temperature, dim=-1).cpu().numpy()
                 for prob in probs:
                     best_idx = int(prob.argmax())
                     label = labels_map[best_idx]
