@@ -652,6 +652,8 @@ async def analyze_stock(request: AnalyzeRequest, background_tasks: BackgroundTas
             sector_sentiment=_sector_rel.sector_sentiment if _sector_rel else None,
             relative_sentiment=_sector_rel.relative_sentiment if _sector_rel else None,
             percentile_vs_sector=_sector_rel.percentile_vs_sector if _sector_rel else None,
+            finbert_relevance_dropped=metrics.get("relevance_dropped", 0),
+            finbert_filter_input=metrics["total"] + metrics.get("relevance_dropped", 0),
         )
 
         def _save_snapshot(**kwargs):

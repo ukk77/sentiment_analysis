@@ -107,6 +107,11 @@ def init_db() -> None:
         _migrate_add_column(conn, "relative_sentiment", "REAL")
         _migrate_add_column(conn, "percentile_vs_sector", "REAL")
         _migrate_add_column(conn, "session", "TEXT")
+        # L6: track FinBERT relevance pre-filter drop rate over time so the
+        # min_confidence=0.40 threshold can be re-tuned from real data instead
+        # of a single ticker's anecdotal "dropped: 0" observation.
+        _migrate_add_column(conn, "finbert_relevance_dropped", "INTEGER")
+        _migrate_add_column(conn, "finbert_filter_input", "INTEGER")
 
 
 def _migrate_add_column(conn: sqlite3.Connection, column: str, col_type: str) -> None:
@@ -134,6 +139,8 @@ def save_snapshot(
     sector_sentiment: float = None,
     relative_sentiment: float = None,
     percentile_vs_sector: float = None,
+    finbert_relevance_dropped: int = None,
+    finbert_filter_input: int = None,
 ) -> None:
     """Persist one analysis snapshot for a ticker."""
     init_db()
@@ -145,14 +152,16 @@ def save_snapshot(
               (ticker, captured_at, avg_sentiment, overall_sentiment,
                confidence, total_articles, positive_count, negative_count, neutral_count,
                session, contrarian_signal, sentiment_percentile,
-               sector_etf, sector_sentiment, relative_sentiment, percentile_vs_sector)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               sector_etf, sector_sentiment, relative_sentiment, percentile_vs_sector,
+               finbert_relevance_dropped, finbert_filter_input)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 ticker.upper(), captured_at, avg_sentiment, overall_sentiment,
                 confidence, total_articles, positive_count, negative_count, neutral_count,
                 session, contrarian_signal, sentiment_percentile,
                 sector_etf, sector_sentiment, relative_sentiment, percentile_vs_sector,
+                finbert_relevance_dropped, finbert_filter_input,
             ),
         )
         conn.commit()
